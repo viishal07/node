@@ -137,17 +137,8 @@ inline BuiltinExitFrame::BuiltinExitFrame(StackFrameIteratorBase* iterator)
     : ExitFrame(iterator) {}
 
 inline Tagged<Object> BuiltinExitFrame::receiver_slot_object() const {
-  // The receiver is the first argument on the frame.
-  // fp[1]: return address.
-  // ------- fixed extra builtin arguments -------
-  // fp[2]: new target.
-  // fp[3]: target.
-  // fp[4]: argc.
-  // fp[5]: hole.
-  // ------- JS stack arguments ------
-  // fp[6]: receiver
-  const int receiverOffset = BuiltinExitFrameConstants::kFirstArgumentOffset;
-  return Tagged<Object>(base::Memory<Address>(fp() + receiverOffset));
+  return Tagged<Object>(
+      base::Memory<Address>(fp() + BuiltinExitFrameConstants::kReceiverOffset));
 }
 
 inline Tagged<Object> BuiltinExitFrame::argc_slot_object() const {
@@ -287,7 +278,7 @@ inline void JavaScriptFrame::set_receiver(Tagged<Object> value) {
   base::Memory<Address>(GetParameterSlot(-1)) = value.ptr();
 }
 
-inline void UnoptimizedFrame::SetFeedbackVector(
+inline void UnoptimizedJSFrame::SetFeedbackVector(
     Tagged<FeedbackVector> feedback_vector) {
   const int offset = InterpreterFrameConstants::kFeedbackVectorFromFp;
   base::Memory<Address>(fp() + offset) = feedback_vector.ptr();
@@ -305,23 +296,23 @@ inline TurbofanStubWithContextFrame::TurbofanStubWithContextFrame(
 inline StubFrame::StubFrame(StackFrameIteratorBase* iterator)
     : TypedFrame(iterator) {}
 
-inline OptimizedFrame::OptimizedFrame(StackFrameIteratorBase* iterator)
+inline OptimizedJSFrame::OptimizedJSFrame(StackFrameIteratorBase* iterator)
     : JavaScriptFrame(iterator) {}
 
-inline UnoptimizedFrame::UnoptimizedFrame(StackFrameIteratorBase* iterator)
+inline UnoptimizedJSFrame::UnoptimizedJSFrame(StackFrameIteratorBase* iterator)
     : JavaScriptFrame(iterator) {}
 
 inline InterpretedFrame::InterpretedFrame(StackFrameIteratorBase* iterator)
-    : UnoptimizedFrame(iterator) {}
+    : UnoptimizedJSFrame(iterator) {}
 
 inline BaselineFrame::BaselineFrame(StackFrameIteratorBase* iterator)
-    : UnoptimizedFrame(iterator) {}
+    : UnoptimizedJSFrame(iterator) {}
 
 inline MaglevFrame::MaglevFrame(StackFrameIteratorBase* iterator)
-    : OptimizedFrame(iterator) {}
+    : OptimizedJSFrame(iterator) {}
 
-inline TurbofanFrame::TurbofanFrame(StackFrameIteratorBase* iterator)
-    : OptimizedFrame(iterator) {}
+inline TurbofanJSFrame::TurbofanJSFrame(StackFrameIteratorBase* iterator)
+    : OptimizedJSFrame(iterator) {}
 
 inline BuiltinFrame::BuiltinFrame(StackFrameIteratorBase* iterator)
     : TypedFrameWithJSLinkage(iterator) {}
@@ -329,6 +320,10 @@ inline BuiltinFrame::BuiltinFrame(StackFrameIteratorBase* iterator)
 #if V8_ENABLE_WEBASSEMBLY
 inline WasmFrame::WasmFrame(StackFrameIteratorBase* iterator)
     : TypedFrame(iterator) {}
+
+inline WasmSegmentStartFrame::WasmSegmentStartFrame(
+    StackFrameIteratorBase* iterator)
+    : WasmFrame(iterator) {}
 
 inline WasmExitFrame::WasmExitFrame(StackFrameIteratorBase* iterator)
     : WasmFrame(iterator) {}
@@ -392,9 +387,9 @@ inline IrregexpFrame::IrregexpFrame(StackFrameIteratorBase* iterator)
 inline CommonFrame* DebuggableStackFrameIterator::frame() const {
   StackFrame* frame = iterator_.frame();
 #if V8_ENABLE_WEBASSEMBLY
-  DCHECK(frame->is_java_script() || frame->is_wasm());
+  DCHECK(frame->is_javascript() || frame->is_wasm());
 #else
-  DCHECK(frame->is_java_script());
+  DCHECK(frame->is_javascript());
 #endif  // V8_ENABLE_WEBASSEMBLY
   return static_cast<CommonFrame*>(frame);
 }
@@ -405,7 +400,7 @@ inline CommonFrame* DebuggableStackFrameIterator::Reframe() {
 }
 
 bool DebuggableStackFrameIterator::is_javascript() const {
-  return frame()->is_java_script();
+  return frame()->is_javascript();
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -438,6 +433,7 @@ inline bool StackFrameIteratorForProfiler::IsValidFrameType(
 #if V8_ENABLE_WEBASSEMBLY
          type == StackFrame::WASM || type == StackFrame::WASM_TO_JS ||
          type == StackFrame::JS_TO_WASM ||
+         type == StackFrame::WASM_SEGMENT_START ||
 #if V8_ENABLE_DRUMBRAKE
          type == StackFrame::WASM_INTERPRETER_ENTRY ||
 #endif  // V8_ENABLE_DRUMBRAKE

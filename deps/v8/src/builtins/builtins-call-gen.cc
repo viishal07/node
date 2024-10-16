@@ -20,6 +20,8 @@
 namespace v8 {
 namespace internal {
 
+#include "src/codegen/define-code-stub-assembler-macros.inc"
+
 void Builtins::Generate_CallFunction_ReceiverIsNullOrUndefined(
     MacroAssembler* masm) {
   Generate_CallFunction(masm, ConvertReceiverMode::kNullOrUndefined);
@@ -280,7 +282,7 @@ void CallOrConstructBuiltinsAssembler::CallOrConstructWithArrayLike(
     var_elements = CAST(CallRuntime(Runtime::kCreateListFromArrayLike, context,
                                     arguments_list));
     var_length = LoadAndUntagToWord32ObjectField(var_elements.value(),
-                                                 FixedArray::kLengthOffset);
+                                                 offsetof(FixedArray, length_));
     Goto(&if_done);
   }
 
@@ -906,6 +908,8 @@ TF_BUILTIN(HandleApiCallOrConstruct, CallOrConstructBuiltinsAssembler) {
                     argc);
   }
 }
+
+#include "src/codegen/undef-code-stub-assembler-macros.inc"
 
 }  // namespace internal
 }  // namespace v8

@@ -23,9 +23,7 @@
 #include "src/wasm/wasm-result.h"
 #include "src/zone/zone-containers.h"
 
-namespace v8 {
-namespace internal {
-namespace wasm {
+namespace v8::internal::wasm {
 
 class ZoneBuffer : public ZoneObject {
  public:
@@ -176,6 +174,7 @@ class V8_EXPORT_PRIVATE WasmFunctionBuilder : public ZoneObject {
   void EmitU32V(uint32_t val);
   void EmitU64V(uint64_t val);
   void EmitCode(const uint8_t* code, uint32_t code_size);
+  void EmitCode(std::initializer_list<const uint8_t> code);
   void Emit(WasmOpcode opcode);
   void EmitWithPrefix(WasmOpcode opcode);
   void EmitGetLocal(uint32_t index);
@@ -212,7 +211,7 @@ class V8_EXPORT_PRIVATE WasmFunctionBuilder : public ZoneObject {
 
   WasmModuleBuilder* builder() const { return builder_; }
   uint32_t func_index() const { return func_index_; }
-  uint32_t sig_index() const { return signature_index_; }
+  ModuleTypeIndex sig_index() const { return signature_index_; }
   inline const FunctionSig* signature() const;
 
  private:
@@ -227,7 +226,7 @@ class V8_EXPORT_PRIVATE WasmFunctionBuilder : public ZoneObject {
 
   WasmModuleBuilder* builder_;
   LocalDeclEncoder locals_;
-  uint32_t signature_index_;
+  ModuleTypeIndex signature_index_;
   uint32_t func_index_;
   ZoneBuffer body_;
   base::Vector<const char> name_;
@@ -341,16 +340,16 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
   // exceeded.
   uint32_t IncreaseTableMinSize(uint32_t table_index, uint32_t count);
   // Adds the signature to the module if it does not already exist.
-  uint32_t AddSignature(const FunctionSig* sig, bool is_final,
-                        uint32_t supertype = kNoSuperType);
+  ModuleTypeIndex AddSignature(const FunctionSig* sig, bool is_final,
+                               uint32_t supertype = kNoSuperType);
   // Does not deduplicate function signatures.
-  uint32_t ForceAddSignature(const FunctionSig* sig, bool is_final,
-                             uint32_t supertype = kNoSuperType);
+  ModuleTypeIndex ForceAddSignature(const FunctionSig* sig, bool is_final,
+                                    uint32_t supertype = kNoSuperType);
   uint32_t AddTag(const FunctionSig* type);
-  uint32_t AddStructType(StructType* type, bool is_final,
-                         uint32_t supertype = kNoSuperType);
-  uint32_t AddArrayType(ArrayType* type, bool is_final,
-                        uint32_t supertype = kNoSuperType);
+  ModuleTypeIndex AddStructType(StructType* type, bool is_final,
+                                uint32_t supertype = kNoSuperType);
+  ModuleTypeIndex AddArrayType(ArrayType* type, bool is_final,
+                               uint32_t supertype = kNoSuperType);
   uint32_t AddTable(ValueType type, uint32_t min_size);
   uint32_t AddTable(ValueType type, uint32_t min_size, uint32_t max_size);
   uint32_t AddTable(ValueType type, uint32_t min_size, uint32_t max_size,
@@ -422,7 +421,9 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
     return types_[index].array_type;
   }
 
-  uint32_t GetSuperType(uint32_t index) { return types_[index].supertype; }
+  ModuleTypeIndex GetSuperType(uint32_t index) {
+    return types_[index].supertype;
+  }
 
   WasmFunctionBuilder* GetFunction(uint32_t index) { return functions_[index]; }
   int NumTags() { return static_cast<int>(tags_.size()); }
@@ -442,7 +443,7 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
 
   int NumDataSegments() { return static_cast<int>(data_segments_.size()); }
 
-  bool IsMemory64(uint32_t index) { return memories_[index].is_memory64; }
+  bool IsMemory64(uint32_t index) { return memories_[index].is_memory64(); }
 
   const FunctionSig* GetTagType(int index) {
     return types_[tags_[index]].function_sig;
@@ -487,8 +488,10 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
     uint32_t max_size = 0;
     bool has_maximum = false;
     bool is_shared = false;
-    bool is_table64 = false;
+    IndexType index_type = IndexType::kI32;
     std::optional<WasmInitExpr> init = {};
+
+    bool is_table64() const { return index_type == IndexType::kI64; }
   };
 
   struct WasmMemory {
@@ -496,7 +499,9 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
     uint32_t max_pages = 0;
     bool has_max_pages = false;
     bool is_shared = false;
-    bool is_memory64 = false;
+    IndexType index_type = IndexType::kI32;
+
+    bool is_memory64() const { return index_type == IndexType::kI64; }
   };
 
   struct WasmDataSegment {
@@ -518,7 +523,7 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
   ZoneVector<WasmElemSegment> element_segments_;
   ZoneVector<WasmGlobal> globals_;
   ZoneVector<int> tags_;
-  ZoneUnorderedMap<FunctionSig, uint32_t> signature_map_;
+  ZoneUnorderedMap<FunctionSig, ModuleTypeIndex> signature_map_;
   int current_recursive_group_start_;
   // first index -> size
   ZoneUnorderedMap<uint32_t, uint32_t> recursive_groups_;
@@ -533,8 +538,6 @@ const FunctionSig* WasmFunctionBuilder::signature() const {
   return builder_->types_[signature_index_].function_sig;
 }
 
-}  // namespace wasm
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::wasm
 
 #endif  // V8_WASM_WASM_MODULE_BUILDER_H_

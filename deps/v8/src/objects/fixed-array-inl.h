@@ -31,54 +31,73 @@ namespace v8::internal {
 
 #include "torque-generated/src/objects/fixed-array-tq-inl.inc"
 
-template <class D, class S, class P>
-int TaggedArrayBase<D, S, P>::capacity() const {
-  return Smi::ToInt(TaggedField<Smi, D::kCapacityOffset>::load(*this));
+template <class S>
+int detail::TaggedArrayHeaderBase<S, false>::capacity() const {
+  return capacity_.load().value();
 }
 
-template <class D, class S, class P>
-int TaggedArrayBase<D, S, P>::capacity(AcquireLoadTag tag) const {
-  return Smi::ToInt(TaggedField<Smi, D::kCapacityOffset>::Acquire_Load(*this));
+template <class S>
+int detail::TaggedArrayHeaderBase<S, false>::capacity(
+    AcquireLoadTag tag) const {
+  return capacity_.Acquire_Load().value();
 }
 
-template <class D, class S, class P>
-void TaggedArrayBase<D, S, P>::set_capacity(int value) {
-  TaggedField<Smi, D::kCapacityOffset>::store(*this, Smi::FromInt(value));
+template <class S>
+void detail::TaggedArrayHeaderBase<S, false>::set_capacity(int value) {
+  capacity_.store(this, Smi::FromInt(value));
 }
 
-template <class D, class S, class P>
-void TaggedArrayBase<D, S, P>::set_capacity(int value, ReleaseStoreTag tag) {
-  TaggedField<Smi, D::kCapacityOffset>::Release_Store(*this,
-                                                      Smi::FromInt(value));
+template <class S>
+void detail::TaggedArrayHeaderBase<S, false>::set_capacity(
+    int value, ReleaseStoreTag tag) {
+  capacity_.Release_Store(this, Smi::FromInt(value));
 }
 
-template <class D, class S, class P>
-template <typename, typename>
-int TaggedArrayBase<D, S, P>::length() const {
-  return capacity();
+template <class S>
+int detail::TaggedArrayHeaderBase<S, true>::length() const {
+  return length_.load().value();
 }
 
-template <class D, class S, class P>
-template <typename, typename>
-int TaggedArrayBase<D, S, P>::length(AcquireLoadTag tag) const {
-  return capacity(tag);
+template <class S>
+int detail::TaggedArrayHeaderBase<S, true>::length(AcquireLoadTag tag) const {
+  return length_.Acquire_Load().value();
 }
 
-template <class D, class S, class P>
-template <typename, typename>
-void TaggedArrayBase<D, S, P>::set_length(int value) {
-  set_capacity(value);
+template <class S>
+void detail::TaggedArrayHeaderBase<S, true>::set_length(int value) {
+  length_.store(this, Smi::FromInt(value));
 }
 
-template <class D, class S, class P>
-template <typename, typename>
-void TaggedArrayBase<D, S, P>::set_length(int value, ReleaseStoreTag tag) {
-  set_capacity(value, tag);
+template <class S>
+void detail::TaggedArrayHeaderBase<S, true>::set_length(int value,
+                                                        ReleaseStoreTag tag) {
+  length_.Release_Store(this, Smi::FromInt(value));
+}
+
+template <class S>
+int detail::TaggedArrayHeaderBase<S, true>::capacity() const {
+  return length();
+}
+
+template <class S>
+int detail::TaggedArrayHeaderBase<S, true>::capacity(AcquireLoadTag tag) const {
+  return length(tag);
+}
+
+template <class S>
+void detail::TaggedArrayHeaderBase<S, true>::set_capacity(int value) {
+  set_length(value);
+}
+
+template <class S>
+void detail::TaggedArrayHeaderBase<S, true>::set_capacity(int value,
+                                                          ReleaseStoreTag tag) {
+  set_length(value, tag);
 }
 
 template <class D, class S, class P>
 bool TaggedArrayBase<D, S, P>::IsInBounds(int index) const {
-  return static_cast<unsigned>(index) < static_cast<unsigned>(capacity());
+  return static_cast<unsigned>(index) < static_cast<unsigned>(this->capacity());
 }
 
 template <class D, class S, class P>
@@ -92,39 +111,28 @@ Tagged<typename TaggedArrayBase<D, S, P>::ElementT>
 TaggedArrayBase<D, S, P>::get(int index) const {
   DCHECK(IsInBounds(index));
   // TODO(jgruber): This tag-less overload shouldn't be relaxed.
-  return ElementFieldT::Relaxed_Load(*this, OffsetOfElementAt(index));
+  return objects()[index].Relaxed_Load();
 }
 
 template <class D, class S, class P>
 Tagged<typename TaggedArrayBase<D, S, P>::ElementT>
 TaggedArrayBase<D, S, P>::get(int index, RelaxedLoadTag) const {
   DCHECK(IsInBounds(index));
-  return ElementFieldT::Relaxed_Load(*this, OffsetOfElementAt(index));
+  return objects()[index].Relaxed_Load();
 }
 
 template <class D, class S, class P>
 Tagged<typename TaggedArrayBase<D, S, P>::ElementT>
 TaggedArrayBase<D, S, P>::get(int index, AcquireLoadTag) const {
   DCHECK(IsInBounds(index));
-  return ElementFieldT::Acquire_Load(*this, OffsetOfElementAt(index));
+  return objects()[index].Acquire_Load();
 }
 
 template <class D, class S, class P>
 Tagged<typename TaggedArrayBase<D, S, P>::ElementT>
 TaggedArrayBase<D, S, P>::get(int index, SeqCstAccessTag) const {
   DCHECK(IsInBounds(index));
-  return ElementFieldT::SeqCst_Load(*this, OffsetOfElementAt(index));
-}
-
-template <class D, class S, class P>
-void TaggedArrayBase<D, S, P>::ConditionalWriteBarrier(
-    Tagged<HeapObject> object, int offset, Tagged<ElementT> value,
-    WriteBarrierMode mode) {
-  if constexpr (kElementsAreMaybeObject) {
-    CONDITIONAL_WEAK_WRITE_BARRIER(object, offset, value, mode);
-  } else {
-    CONDITIONAL_WRITE_BARRIER(object, offset, value, mode);
-  }
+  return objects()[index].SeqCst_Load();
 }
 
 template <class D, class S, class P>
@@ -133,9 +141,7 @@ void TaggedArrayBase<D, S, P>::set(int index, Tagged<ElementT> value,
   DCHECK(!IsCowArray());
   DCHECK(IsInBounds(index));
   // TODO(jgruber): This tag-less overload shouldn't be relaxed.
-  const int offset = OffsetOfElementAt(index);
-  ElementFieldT::Relaxed_Store(*this, offset, value);
-  ConditionalWriteBarrier(*this, offset, value, mode);
+  objects()[index].Relaxed_Store(this, value, mode);
 }
 
 template <class D, class S, class P>
@@ -149,9 +155,7 @@ void TaggedArrayBase<D, S, P>::set(int index, Tagged<ElementT> value,
                                    RelaxedStoreTag tag, WriteBarrierMode mode) {
   DCHECK(!IsCowArray());
   DCHECK(IsInBounds(index));
-  const int offset = OffsetOfElementAt(index);
-  ElementFieldT::Relaxed_Store(*this, offset, value);
-  ConditionalWriteBarrier(*this, offset, value, mode);
+  objects()[index].Relaxed_Store(this, value, mode);
 }
 
 template <class D, class S, class P>
@@ -166,9 +170,7 @@ void TaggedArrayBase<D, S, P>::set(int index, Tagged<ElementT> value,
                                    ReleaseStoreTag tag, WriteBarrierMode mode) {
   DCHECK(!IsCowArray());
   DCHECK(IsInBounds(index));
-  const int offset = OffsetOfElementAt(index);
-  ElementFieldT::Release_Store(*this, offset, value);
-  ConditionalWriteBarrier(*this, offset, value, mode);
+  objects()[index].Release_Store(this, value, mode);
 }
 
 template <class D, class S, class P>
@@ -183,9 +185,7 @@ void TaggedArrayBase<D, S, P>::set(int index, Tagged<ElementT> value,
                                    SeqCstAccessTag tag, WriteBarrierMode mode) {
   DCHECK(!IsCowArray());
   DCHECK(IsInBounds(index));
-  const int offset = OffsetOfElementAt(index);
-  ElementFieldT::SeqCst_Store(*this, offset, value);
-  ConditionalWriteBarrier(*this, offset, value, mode);
+  objects()[index].SeqCst_Store(this, value, mode);
 }
 
 template <class D, class S, class P>
@@ -201,10 +201,7 @@ TaggedArrayBase<D, S, P>::swap(int index, Tagged<ElementT> value,
                                SeqCstAccessTag, WriteBarrierMode mode) {
   DCHECK(!IsCowArray());
   DCHECK(IsInBounds(index));
-  Tagged<ElementT> previous_value =
-      SEQ_CST_SWAP_FIELD(*this, OffsetOfElementAt(index), value);
-  ConditionalWriteBarrier(*this, OffsetOfElementAt(index), value, mode);
-  return previous_value;
+  return objects()[index].SeqCst_Swap(this, value, mode);
 }
 
 template <class D, class S, class P>
@@ -215,12 +212,7 @@ TaggedArrayBase<D, S, P>::compare_and_swap(int index, Tagged<ElementT> expected,
                                            WriteBarrierMode mode) {
   DCHECK(!IsCowArray());
   DCHECK(IsInBounds(index));
-  Tagged<ElementT> previous_value = SEQ_CST_COMPARE_AND_SWAP_FIELD(
-      *this, OffsetOfElementAt(index), expected, value);
-  if (previous_value == expected) {
-    ConditionalWriteBarrier(*this, OffsetOfElementAt(index), value, mode);
-  }
-  return previous_value;
+  return objects()[index].SeqCst_CompareAndSwap(this, expected, value, mode);
 }
 
 template <class D, class S, class P>
@@ -237,8 +229,8 @@ void TaggedArrayBase<D, S, P>::MoveElements(Isolate* isolate, Tagged<D> dst,
   DCHECK_LE(src_index + len, src->length());
 
   DisallowGarbageCollection no_gc;
-  SlotType dst_slot(dst->RawFieldOfElementAt(dst_index));
-  SlotType src_slot(src->RawFieldOfElementAt(src_index));
+  SlotType dst_slot(&dst->objects()[dst_index]);
+  SlotType src_slot(&src->objects()[src_index]);
   isolate->heap()->MoveRange(dst, dst_slot, src_slot, len, mode);
 }
 
@@ -256,18 +248,18 @@ void TaggedArrayBase<D, S, P>::CopyElements(Isolate* isolate, Tagged<D> dst,
   DCHECK_LE(src_index + len, src->capacity());
 
   DisallowGarbageCollection no_gc;
-  SlotType dst_slot(dst->RawFieldOfElementAt(dst_index));
-  SlotType src_slot(src->RawFieldOfElementAt(src_index));
+  SlotType dst_slot(&dst->objects()[dst_index]);
+  SlotType src_slot(&src->objects()[src_index]);
   isolate->heap()->CopyRange(dst, dst_slot, src_slot, len, mode);
 }
 
 template <class D, class S, class P>
 void TaggedArrayBase<D, S, P>::RightTrim(Isolate* isolate, int new_capacity) {
-  int old_capacity = capacity();
+  int old_capacity = this->capacity();
   CHECK_GT(new_capacity, 0);  // Due to possible canonicalization.
   CHECK_LE(new_capacity, old_capacity);
   if (new_capacity == old_capacity) return;
-  isolate->heap()->RightTrimArray(Cast<D>(*this), new_capacity, old_capacity);
+  isolate->heap()->RightTrimArray(Cast<D>(this), new_capacity, old_capacity);
 }
 
 // Due to right-trimming (which creates a filler object before publishing the
@@ -275,7 +267,7 @@ void TaggedArrayBase<D, S, P>::RightTrim(Isolate* isolate, int new_capacity) {
 // visitors need to read the length with acquire semantics.
 template <class D, class S, class P>
 int TaggedArrayBase<D, S, P>::AllocatedSize() const {
-  return SizeFor(capacity(kAcquireLoad));
+  return SizeFor(this->capacity(kAcquireLoad));
 }
 
 template <class D, class S, class P>
@@ -287,11 +279,7 @@ TaggedArrayBase<D, S, P>::RawFieldOfFirstElement() const {
 template <class D, class S, class P>
 typename TaggedArrayBase<D, S, P>::SlotType
 TaggedArrayBase<D, S, P>::RawFieldOfElementAt(int index) const {
-  if constexpr (kElementsAreMaybeObject) {
-    return this->RawMaybeWeakField(OffsetOfElementAt(index));
-  } else {
-    return this->RawField(OffsetOfElementAt(index));
-  }
+  return SlotType(&objects()[index]);
 }
 
 // static
@@ -318,7 +306,11 @@ Handle<FixedArray> FixedArray::New(IsolateT* isolate, int capacity,
 // static
 template <class IsolateT>
 Handle<TrustedFixedArray> TrustedFixedArray::New(IsolateT* isolate,
-                                                 int capacity) {
+                                                 int capacity,
+                                                 AllocationType allocation) {
+  DCHECK(allocation == AllocationType::kTrusted ||
+         allocation == AllocationType::kSharedTrusted);
+
   if (V8_UNLIKELY(static_cast<unsigned>(capacity) >
                   TrustedFixedArray::kMaxLength)) {
     FATAL("Fatal JavaScript invalid size error %d (see crbug.com/1201626)",
@@ -330,8 +322,8 @@ Handle<TrustedFixedArray> TrustedFixedArray::New(IsolateT* isolate,
   // The same is true for the other trusted-space arrays below.
 
   std::optional<DisallowGarbageCollection> no_gc;
-  Handle<TrustedFixedArray> result = Cast<TrustedFixedArray>(
-      Allocate(isolate, capacity, &no_gc, AllocationType::kTrusted));
+  Handle<TrustedFixedArray> result =
+      Cast<TrustedFixedArray>(Allocate(isolate, capacity, &no_gc, allocation));
   MemsetTagged((*result)->RawFieldOfFirstElement(), Smi::zero(), capacity);
   return result;
 }
@@ -374,7 +366,7 @@ Handle<D> TaggedArrayBase<D, S, P>::Allocate(
   Tagged<Map> map = Cast<Map>(roots.object_at(S::kMapRootIndex));
   DCHECK(ReadOnlyHeap::Contains(map));
 
-  xs->set_map_after_allocation(map, SKIP_WRITE_BARRIER);
+  xs->set_map_after_allocation(isolate, map, SKIP_WRITE_BARRIER);
   xs->set_capacity(capacity);
 
   return handle(xs, isolate);
@@ -393,54 +385,16 @@ constexpr int TaggedArrayBase<D, S, P>::NewCapacityForIndex(int index,
   return capacity;
 }
 
-int FixedArrayBase::length() const {
-  return Smi::ToInt(
-      TaggedField<Smi, TaggedArrayShape::kCapacityOffset>::load(*this));
-}
-
-int FixedArrayBase::length(AcquireLoadTag tag) const {
-  return Smi::ToInt(
-      TaggedField<Smi, TaggedArrayShape::kCapacityOffset>::Acquire_Load(*this));
-}
-
-void FixedArrayBase::set_length(int value) {
-  TaggedField<Smi, TaggedArrayShape::kCapacityOffset>::store(
-      *this, Smi::FromInt(value));
-}
-
-void FixedArrayBase::set_length(int value, ReleaseStoreTag tag) {
-  TaggedField<Smi, TaggedArrayShape::kCapacityOffset>::Release_Store(
-      *this, Smi::FromInt(value));
-}
-
-OBJECT_CONSTRUCTORS_IMPL(WeakFixedArray, WeakFixedArray::Super)
-
-OBJECT_CONSTRUCTORS_IMPL(TrustedWeakFixedArray, TrustedWeakFixedArray::Super)
-
 TQ_OBJECT_CONSTRUCTORS_IMPL(WeakArrayList)
 
 template <class D, class S, class P>
-TaggedArrayBase<D, S, P>::TaggedArrayBase(Address ptr) : P(ptr) {}
-template <class D, class S, class P>
 PrimitiveArrayBase<D, S, P>::PrimitiveArrayBase(Address ptr) : P(ptr) {}
-
-OBJECT_CONSTRUCTORS_IMPL(FixedArrayBase, HeapObject)
-
-OBJECT_CONSTRUCTORS_IMPL(FixedArray, FixedArray::Super)
-
-OBJECT_CONSTRUCTORS_IMPL(TrustedFixedArray, TrustedFixedArray::Super)
-
-OBJECT_CONSTRUCTORS_IMPL(ProtectedFixedArray, ProtectedFixedArray::Super)
 
 OBJECT_CONSTRUCTORS_IMPL(FixedDoubleArray, FixedDoubleArray::Super)
 
 OBJECT_CONSTRUCTORS_IMPL(ByteArray, ByteArray::Super)
 
 OBJECT_CONSTRUCTORS_IMPL(TrustedByteArray, TrustedByteArray::Super)
-
-OBJECT_CONSTRUCTORS_IMPL(ExternalPointerArray, FixedArrayBase)
-
-OBJECT_CONSTRUCTORS_IMPL(ArrayList, ArrayList::Super)
 
 NEVER_READ_ONLY_SPACE_IMPL(WeakArrayList)
 
@@ -465,13 +419,13 @@ void FixedArray::FillWithHoles(int from, int to) {
 
 void FixedArray::MoveElements(Isolate* isolate, int dst_index, int src_index,
                               int len, WriteBarrierMode mode) {
-  MoveElements(isolate, *this, dst_index, *this, src_index, len, mode);
+  MoveElements(isolate, this, dst_index, this, src_index, len, mode);
 }
 
 void FixedArray::CopyElements(Isolate* isolate, int dst_index,
                               Tagged<FixedArray> src, int src_index, int len,
                               WriteBarrierMode mode) {
-  CopyElements(isolate, *this, dst_index, src, src_index, len, mode);
+  CopyElements(isolate, this, dst_index, src, src_index, len, mode);
 }
 
 // static
@@ -487,118 +441,6 @@ Handle<FixedArray> FixedArray::Resize(Isolate* isolate,
 }
 
 inline int WeakArrayList::AllocatedSize() const { return SizeFor(capacity()); }
-
-// Perform a binary search in a fixed array.
-template <SearchMode search_mode, typename T>
-int BinarySearch(T* array, Tagged<Name> name, int valid_entries,
-                 int* out_insertion_index) {
-  DCHECK_IMPLIES(search_mode == VALID_ENTRIES, out_insertion_index == nullptr);
-  int low = 0;
-  // We have to search on all entries, even when search_mode == VALID_ENTRIES.
-  // This is because the InternalIndex might be different from the SortedIndex
-  // (i.e the first added item in {array} could be the last in the sorted
-  // index). After doing the binary search and getting the correct internal
-  // index we check to have the index lower than valid_entries, if needed.
-  int high = array->number_of_entries() - 1;
-  uint32_t hash = name->hash();
-  int limit = high;
-
-  DCHECK(low <= high);
-
-  while (low != high) {
-    int mid = low + (high - low) / 2;
-    Tagged<Name> mid_name = array->GetSortedKey(mid);
-    uint32_t mid_hash = mid_name->hash();
-
-    if (mid_hash >= hash) {
-      high = mid;
-    } else {
-      low = mid + 1;
-    }
-  }
-
-  for (; low <= limit; ++low) {
-    int sort_index = array->GetSortedKeyIndex(low);
-    Tagged<Name> entry = array->GetKey(InternalIndex(sort_index));
-    uint32_t current_hash = entry->hash();
-    if (current_hash != hash) {
-      // 'search_mode == ALL_ENTRIES' here and below is not needed since
-      // 'out_insertion_index != nullptr' implies 'search_mode == ALL_ENTRIES'.
-      // Having said that, when creating the template for <VALID_ENTRIES> these
-      // ifs can be elided by the C++ compiler if we add 'search_mode ==
-      // ALL_ENTRIES'.
-      if (search_mode == ALL_ENTRIES && out_insertion_index != nullptr) {
-        *out_insertion_index = sort_index + (current_hash > hash ? 0 : 1);
-      }
-      return T::kNotFound;
-    }
-    if (entry == name) {
-      if (search_mode == ALL_ENTRIES || sort_index < valid_entries) {
-        return sort_index;
-      }
-      return T::kNotFound;
-    }
-  }
-
-  if (search_mode == ALL_ENTRIES && out_insertion_index != nullptr) {
-    *out_insertion_index = limit + 1;
-  }
-  return T::kNotFound;
-}
-
-// Perform a linear search in this fixed array. len is the number of entry
-// indices that are valid.
-template <SearchMode search_mode, typename T>
-int LinearSearch(T* array, Tagged<Name> name, int valid_entries,
-                 int* out_insertion_index) {
-  if (search_mode == ALL_ENTRIES && out_insertion_index != nullptr) {
-    uint32_t hash = name->hash();
-    int len = array->number_of_entries();
-    for (int number = 0; number < len; number++) {
-      int sorted_index = array->GetSortedKeyIndex(number);
-      Tagged<Name> entry = array->GetKey(InternalIndex(sorted_index));
-      uint32_t current_hash = entry->hash();
-      if (current_hash > hash) {
-        *out_insertion_index = sorted_index;
-        return T::kNotFound;
-      }
-      if (entry == name) return sorted_index;
-    }
-    *out_insertion_index = len;
-    return T::kNotFound;
-  } else {
-    DCHECK_LE(valid_entries, array->number_of_entries());
-    DCHECK_NULL(out_insertion_index);  // Not supported here.
-    for (int number = 0; number < valid_entries; number++) {
-      if (array->GetKey(InternalIndex(number)) == name) return number;
-    }
-    return T::kNotFound;
-  }
-}
-
-template <SearchMode search_mode, typename T>
-int Search(T* array, Tagged<Name> name, int valid_entries,
-           int* out_insertion_index, bool concurrent_search) {
-  SLOW_DCHECK_IMPLIES(!concurrent_search, array->IsSortedNoDuplicates());
-
-  if (valid_entries == 0) {
-    if (search_mode == ALL_ENTRIES && out_insertion_index != nullptr) {
-      *out_insertion_index = 0;
-    }
-    return T::kNotFound;
-  }
-
-  // Do linear search for small arrays, and for searches in the background
-  // thread.
-  const int kMaxElementsForLinearSearch = 8;
-  if (valid_entries <= kMaxElementsForLinearSearch || concurrent_search) {
-    return LinearSearch<search_mode>(array, name, valid_entries,
-                                     out_insertion_index);
-  }
-
-  return BinarySearch<search_mode>(array, name, valid_entries,
-                                   out_insertion_index);
-}
 
 template <class D, class S, class P>
 int PrimitiveArrayBase<D, S, P>::length() const {
@@ -732,7 +574,7 @@ Handle<D> PrimitiveArrayBase<D, S, P>::Allocate(
   Tagged<Map> map = Cast<Map>(roots.object_at(S::kMapRootIndex));
   DCHECK(ReadOnlyHeap::Contains(map));
 
-  xs->set_map_after_allocation(map, SKIP_WRITE_BARRIER);
+  xs->set_map_after_allocation(isolate, map, SKIP_WRITE_BARRIER);
   xs->set_length(length);
 
   return handle(xs, isolate);
@@ -790,7 +632,7 @@ void FixedDoubleArray::MoveElements(Isolate* isolate, int dst_index,
                                     WriteBarrierMode mode) {
   DCHECK_EQ(SKIP_WRITE_BARRIER, mode);
   MemMove(AddressOfElementAt(dst_index), AddressOfElementAt(src_index),
-          len * Shape::kElementSize);
+          len * kElementSize);
 }
 
 void FixedDoubleArray::FillWithHoles(int from, int to) {
@@ -838,7 +680,7 @@ Handle<TrustedWeakFixedArray> TrustedWeakFixedArray::New(IsolateT* isolate,
 }
 
 Tagged<MaybeObject> WeakArrayList::Get(int index) const {
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
+  PtrComprCageBase cage_base = GetPtrComprCageBase();
   return Get(cage_base, index);
 }
 Tagged<MaybeObject> WeakArrayList::get(int index) const { return Get(index); }
@@ -887,7 +729,10 @@ Tagged<HeapObject> WeakArrayList::Iterator::Next() {
   return Tagged<HeapObject>();
 }
 
-SMI_ACCESSORS(ArrayList, length, ArrayList::Shape::kLengthOffset)
+int ArrayList ::length() const { return length_.load().value(); }
+void ArrayList ::set_length(int value) {
+  length_.store(this, Smi::FromInt(value));
+}
 
 // static
 template <class IsolateT>
@@ -1028,24 +873,6 @@ template <typename T, typename Base>
 int FixedIntegerArrayBase<T, Base>::length() const {
   DCHECK_EQ(Base::length() % sizeof(T), 0);
   return Base::length() / sizeof(T);
-}
-
-template <ExternalPointerTag tag>
-inline Address ExternalPointerArray::get(int index, Isolate* isolate) {
-  return ReadExternalPointerField<tag>(OffsetOfElementAt(index), isolate);
-}
-
-template <ExternalPointerTag tag>
-inline void ExternalPointerArray::set(int index, Isolate* isolate,
-                                      Address value) {
-  WriteLazilyInitializedExternalPointerField<tag>(OffsetOfElementAt(index),
-                                                  isolate, value);
-}
-
-// static
-Handle<ExternalPointerArray> ExternalPointerArray::New(
-    Isolate* isolate, int length, AllocationType allocation) {
-  return isolate->factory()->NewExternalPointerArray(length, allocation);
 }
 
 template <class T, class Super>

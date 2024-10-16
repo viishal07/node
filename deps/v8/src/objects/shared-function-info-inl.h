@@ -361,9 +361,6 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, is_sparkplug_compiling,
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, maglev_compilation_failed,
                     SharedFunctionInfo::MaglevCompilationFailedBit)
 
-BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, sparkplug_compiled,
-                    SharedFunctionInfo::SparkplugCompiledBit)
-
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2,
                     function_context_independent_compiled,
                     SharedFunctionInfo::FunctionContextIndependentCompiledBit)
@@ -884,13 +881,9 @@ const wasm::WasmModule* SharedFunctionInfo::wasm_module() const {
   return function_data->instance_data()->module();
 }
 
-const wasm::FunctionSig* SharedFunctionInfo::wasm_function_signature() const {
-  const wasm::WasmModule* module = wasm_module();
-  if (!module) return nullptr;
-  Tagged<WasmExportedFunctionData> function_data =
-      wasm_exported_function_data();
-  DCHECK_LT(function_data->function_index(), module->functions.size());
-  return module->functions[function_data->function_index()].sig;
+const wasm::CanonicalSig* SharedFunctionInfo::wasm_function_signature() const {
+  if (!HasWasmExportedFunctionData()) return nullptr;
+  return wasm_exported_function_data()->sig();
 }
 
 int SharedFunctionInfo::wasm_function_index() const {
@@ -938,6 +931,13 @@ DEF_GETTER(SharedFunctionInfo, wasm_capi_function_data,
 DEF_GETTER(SharedFunctionInfo, wasm_resume_data, Tagged<WasmResumeData>) {
   DCHECK(HasWasmResumeData());
   return Cast<WasmResumeData>(GetUntrustedData());
+}
+
+bool SharedFunctionInfo::is_promising_wasm_export() const {
+  Tagged<WasmExportedFunctionData> function_data =
+      wasm_exported_function_data();
+  return WasmFunctionData::PromiseField::decode(
+             function_data->js_promise_flags()) == wasm::kPromise;
 }
 
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -1043,7 +1043,8 @@ void SharedFunctionInfo::ClearPreparseData(IsolateForSandbox isolate) {
                                ClearRecordedSlots::kYes);
 
   // Swap the map.
-  data->set_map(GetReadOnlyRoots().uncompiled_data_without_preparse_data_map(),
+  data->set_map(heap->isolate(),
+                GetReadOnlyRoots().uncompiled_data_without_preparse_data_map(),
                 kReleaseStore);
 
   // Ensure that the clear was successful.

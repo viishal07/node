@@ -3,10 +3,11 @@
 // found in the LICENSE file.
 
 #include "src/compiler/simplified-operator.h"
+
 #include "src/compiler/opcodes.h"
 #include "src/compiler/operator-properties.h"
 #include "src/compiler/operator.h"
-#include "src/compiler/types.h"
+#include "src/compiler/turbofan-types.h"
 #include "test/unittests/test-utils.h"
 
 namespace v8 {
@@ -123,7 +124,7 @@ INSTANTIATE_TEST_SUITE_P(SimplifiedOperatorTest, SimplifiedPureOperatorTest,
 // Element access operators.
 
 const ElementAccess kElementAccesses[] = {
-    {kTaggedBase, FixedArray::kHeaderSize, Type::Any(),
+    {kTaggedBase, OFFSET_OF_DATA_START(FixedArray), Type::Any(),
      MachineType::AnyTagged(), kFullWriteBarrier},
     {kUntaggedBase, 0, Type::Any(), MachineType::Int8(), kNoWriteBarrier},
     {kUntaggedBase, 0, Type::Any(), MachineType::Int16(), kNoWriteBarrier},

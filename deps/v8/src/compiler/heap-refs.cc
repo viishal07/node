@@ -17,6 +17,7 @@
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/js-heap-broker-inl.h"
 #include "src/execution/protectors-inl.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/objects/allocation-site-inl.h"
 #include "src/objects/descriptor-array.h"
 #include "src/objects/heap-number-inl.h"
@@ -585,7 +586,7 @@ int InstanceSizeWithMinSlack(JSHeapBroker* broker, MapRef map) {
   // processing). This is to avoid having to take two locks
   // (full_transition_array_access and map_updater_access) at once and thus
   // having to deal with related deadlock issues.
-  ZoneVector<Handle<Map>> maps(broker->zone());
+  ZoneVector<IndirectHandle<Map>> maps(broker->zone());
   maps.push_back(map.object());
 
   {
@@ -1320,7 +1321,7 @@ OptionalObjectRef JSObjectRef::RawInobjectPropertyAt(JSHeapBroker* broker,
 }
 
 bool JSObjectRef::IsElementsTenured(FixedArrayBaseRef elements) {
-  return !ObjectInYoungGeneration(*elements.object());
+  return !HeapLayout::InYoungGeneration(*elements.object());
 }
 
 FieldIndex MapRef::GetFieldIndexFor(InternalIndex descriptor_index) const {
@@ -1409,14 +1410,14 @@ std::optional<Handle<String>> StringRef::ObjectIfContentAccessible(
   }
 }
 
-int StringRef::length() const { return object()->length(kAcquireLoad); }
+uint32_t StringRef::length() const { return object()->length(kAcquireLoad); }
 
 std::optional<uint16_t> StringRef::GetFirstChar(JSHeapBroker* broker) const {
   return GetChar(broker, 0);
 }
 
 std::optional<uint16_t> StringRef::GetChar(JSHeapBroker* broker,
-                                           int index) const {
+                                           uint32_t index) const {
   if (!IsContentAccessible()) {
     TRACE_BROKER_MISSING(
         broker,
@@ -1951,7 +1952,7 @@ HoleType ObjectRef::HoleType() const {
   // Trusted objects cannot be TheHole and comparing them to TheHole is not
   // allowed, as they live in different cage bases.
   if (i::IsHeapObject(*object()) &&
-      IsTrustedSpaceObject(Cast<HeapObject>(*object())))
+      i::HeapLayout::InTrustedSpace(Cast<HeapObject>(*object())))
     return HoleType::kNone;
 #define IF_HOLE_THEN_RETURN(Name, name, Root) \
   if (i::Is##Name(*object())) {               \

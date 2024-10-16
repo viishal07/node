@@ -1140,9 +1140,23 @@ class ParserBase {
   bool is_await_allowed() const {
     return is_async_function() || IsModule(function_state_->kind());
   }
-  bool is_await_as_identifier_disallowed() {
+  bool is_await_as_identifier_disallowed() const {
     return flags().is_module() ||
            IsAwaitAsIdentifierDisallowed(function_state_->kind());
+  }
+  bool IsAwaitAsIdentifierDisallowed(FunctionKind kind) const {
+    // 'await' is always disallowed as an identifier in module contexts. Callers
+    // should short-circuit the module case instead of calling this.
+    //
+    // There is one special case: direct eval inside a module. In that case,
+    // even though the eval script itself is parsed as a Script (not a Module,
+    // i.e. flags().is_module() is false), thus allowing await as an identifier
+    // by default, the immediate outer scope is a module scope.
+    DCHECK(!IsModule(kind) ||
+           (flags().is_eval() && function_state_->scope() == original_scope_ &&
+            IsModule(function_state_->kind())));
+    return IsAsyncFunction(kind) ||
+           kind == FunctionKind::kClassStaticInitializerFunction;
   }
   bool is_using_allowed() const {
     // UsingDeclaration and AwaitUsingDeclaration are Syntax Errors if the goal
@@ -4005,6 +4019,8 @@ ParserBase<Impl>::ParseMemberWithPresentNewPrefixesExpression() {
   CheckStackOverflow();
 
   if (peek() == Token::kImport && PeekAhead() == Token::kLeftParen) {
+    // TODO(42204365): Peek ahead to see if this is an import source call.
+    // It needs to peek ahead for tokens `import . source (`.
     impl()->ReportMessageAt(scanner()->peek_location(),
                             MessageTemplate::kImportCallNotNewExpression);
     return impl()->FailureExpression();
@@ -4156,17 +4172,15 @@ ParserBase<Impl>::ParseImportExpressions() {
                  v8_flags.js_source_phase_imports);
   // TODO(42204365): Enable import attributes with source phase import once
   // specified.
-  const bool check_import_attributes = (v8_flags.harmony_import_assertions ||
-                                        v8_flags.harmony_import_attributes) &&
-                                       phase == ModuleImportPhase::kEvaluation;
-  if (check_import_attributes && Check(Token::kComma)) {
+  if (v8_flags.harmony_import_attributes &&
+      phase == ModuleImportPhase::kEvaluation && Check(Token::kComma)) {
     if (Check(Token::kRightParen)) {
       // A trailing comma allowed after the specifier.
       return factory()->NewImportCallExpression(specifier, phase, pos);
     } else {
       ExpressionT import_options = ParseAssignmentExpressionCoverGrammar();
       Check(Token::kComma);  // A trailing comma is allowed after the import
-                             // assertions.
+                             // attributes.
       Expect(Token::kRightParen);
       return factory()->NewImportCallExpression(specifier, phase,
                                                 import_options, pos);
@@ -4486,6 +4500,12 @@ void ParserBase<Impl>::ParseVariableDeclarations(
       name = impl()->NullIdentifier();
       pattern = ParseBindingPattern();
       DCHECK(!impl()->IsIdentifier(pattern));
+    } else {
+      // `using` declarations should have an identifier.
+      impl()->ReportMessageAt(Scanner::Location(decl_pos, end_position()),
+                              MessageTemplate::kDeclarationMissingInitializer,
+                              "using");
+      return;
     }
 
     Scanner::Location variable_loc = scanner()->location();
@@ -4806,8 +4826,7 @@ void ParserBase<Impl>::ParseFunctionBody(
               : Token::kRightBrace;
 
       if (IsAsyncGeneratorFunction(kind)) {
-        impl()->ParseAndRewriteAsyncGeneratorFunctionBody(pos, kind,
-                                                          &inner_body);
+        impl()->ParseAsyncGeneratorFunctionBody(pos, kind, &inner_body);
       } else if (IsGeneratorFunction(kind)) {
         impl()->ParseGeneratorFunctionBody(pos, kind, &inner_body);
       } else {
@@ -5297,6 +5316,14 @@ void ParserBase<Impl>::ParseClassLiteralBody(ClassInfo& class_info,
                                       prop_info.is_computed_name, &class_info);
       impl()->InferFunctionName();
       continue;
+    }
+
+    if (property_kind == ClassLiteralProperty::Kind::AUTO_ACCESSOR) {
+      // Private auto-accessors are handled above with the other private
+      // properties.
+      DCHECK(!prop_info.is_private);
+      impl()->AddInstanceFieldOrStaticElement(property, &class_info,
+                                              prop_info.is_static);
     }
 
     impl()->DeclarePublicClassMethod(name, property, is_constructor,

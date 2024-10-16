@@ -41,7 +41,29 @@ class WasmLoweringReducer : public Next {
     return LowerGlobalSetOrGet(instance, value, global, GlobalMode::kStore);
   }
 
-  OpIndex REDUCE(Null)(wasm::ValueType type) { return Null(type); }
+  OpIndex REDUCE(Null)(wasm::ValueType type) {
+    OpIndex roots = __ LoadRootRegister();
+    RootIndex index =
+        wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_) ||
+                wasm::IsSubtypeOf(type, wasm::kWasmExnRef, module_)
+            ? RootIndex::kNullValue
+            : RootIndex::kWasmNull;
+    // We load WasmNull as a pointer here and not as a TaggedPointer because
+    // WasmNull is stored uncompressed in the IsolateData, and a load of a
+    // TaggedPointer loads compressed pointers.
+#if V8_TARGET_BIG_ENDIAN
+    // On big endian a full pointer load is needed as otherwise the wrong half
+    // of the 64 bit address is loaded.
+    return __ BitcastWordPtrToTagged(__ Load(
+        roots, LoadOp::Kind::RawAligned().Immutable(),
+        MemoryRepresentation::UintPtr(), IsolateData::root_slot_offset(index)));
+#else
+    // On little endian a tagged load is enough and saves the bitcast.
+    return __ Load(roots, LoadOp::Kind::RawAligned().Immutable(),
+                   MemoryRepresentation::TaggedPointer(),
+                   IsolateData::root_slot_offset(index));
+#endif
+  }
 
   V<Word32> REDUCE(IsNull)(OpIndex object, wasm::ValueType type) {
 #if V8_STATIC_ROOTS_BOOL
@@ -53,7 +75,7 @@ class WasmLoweringReducer : public Next {
         __ UintPtrConstant(is_wasm_null ? StaticReadOnlyRoot::kWasmNull
                                         : StaticReadOnlyRoot::kNullValue));
 #else
-    OpIndex null_value = Null(type);
+    V<Object> null_value = __ Null(type);
 #endif
     return __ TaggedEqual(object, null_value);
   }
@@ -88,7 +110,8 @@ class WasmLoweringReducer : public Next {
   }
 
   V<Map> REDUCE(RttCanon)(V<FixedArray> rtts, uint32_t type_index) {
-    int map_offset = FixedArray::kHeaderSize + type_index * kTaggedSize;
+    int map_offset =
+        OFFSET_OF_DATA_START(FixedArray) + type_index * kTaggedSize;
     return __ Load(rtts, LoadOp::Kind::TaggedBase().Immutable(),
                    MemoryRepresentation::AnyTagged(), map_offset);
   }
@@ -128,7 +151,7 @@ class WasmLoweringReducer : public Next {
     GOTO(end_label, object);
 
     BIND(null_label);
-    GOTO(end_label, Null(wasm::kWasmAnyRef));
+    GOTO(end_label, __ Null(wasm::kWasmAnyRef));
 
     // Canonicalize SMI.
     BIND(smi_label);
@@ -195,7 +218,7 @@ class WasmLoweringReducer : public Next {
   V<Object> REDUCE(ExternConvertAny)(V<Object> object) {
     Label<Object> end(&Asm());
     GOTO_IF_NOT(__ IsNull(object, wasm::kWasmAnyRef), end, object);
-    GOTO(end, Null(wasm::kWasmExternRef));
+    GOTO(end, __ Null(wasm::kWasmExternRef));
     BIND(end, result);
     return result;
   }
@@ -530,6 +553,7 @@ class WasmLoweringReducer : public Next {
       case wasm::kRefNull:
         return MemoryRepresentation::AnyTagged();
       case wasm::kVoid:
+      case wasm::kTop:
       case wasm::kBottom:
         UNREACHABLE();
     }
@@ -851,7 +875,7 @@ class WasmLoweringReducer : public Next {
             instance, ImportedMutableGlobalsBuffers,
             MemoryRepresentation::TaggedPointer());
         int offset_in_buffers =
-            FixedArray::kHeaderSize + global->offset * kTaggedSize;
+            OFFSET_OF_DATA_START(FixedArray) + global->offset * kTaggedSize;
         V<HeapObject> base =
             __ Load(buffers, LoadOp::Kind::TaggedBase(),
                     MemoryRepresentation::AnyTagged(), offset_in_buffers);
@@ -888,7 +912,8 @@ class WasmLoweringReducer : public Next {
     } else if (global->type.is_reference()) {
       V<HeapObject> base = LOAD_IMMUTABLE_INSTANCE_FIELD(
           instance, TaggedGlobalsBuffer, MemoryRepresentation::TaggedPointer());
-      int offset = FixedArray::kHeaderSize + global->offset * kTaggedSize;
+      int offset =
+          OFFSET_OF_DATA_START(FixedArray) + global->offset * kTaggedSize;
       if (mode == GlobalMode::kLoad) {
         LoadOp::Kind load_kind = is_mutable
                                      ? LoadOp::Kind::TaggedBase()
@@ -917,30 +942,6 @@ class WasmLoweringReducer : public Next {
         return OpIndex::Invalid();
       }
     }
-  }
-
-  OpIndex Null(wasm::ValueType type) {
-    OpIndex roots = __ LoadRootRegister();
-    RootIndex index =
-        wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_) ||
-                wasm::IsSubtypeOf(type, wasm::kWasmExnRef, module_)
-            ? RootIndex::kNullValue
-            : RootIndex::kWasmNull;
-    // We load WasmNull as a pointer here and not as a TaggedPointer because
-    // WasmNull is stored uncompressed in the IsolateData, and a load of a
-    // TaggedPointer loads compressed pointers.
-#if V8_TARGET_BIG_ENDIAN
-    // On big endian a full pointer load is needed as otherwise the wrong half
-    // of the 64 bit address is loaded.
-    return __ BitcastWordPtrToTagged(__ Load(
-        roots, LoadOp::Kind::RawAligned().Immutable(),
-        MemoryRepresentation::UintPtr(), IsolateData::root_slot_offset(index)));
-#else
-    // On little endian a tagged load is enough and saves the bitcast.
-    return __ Load(roots, LoadOp::Kind::RawAligned().Immutable(),
-                   MemoryRepresentation::TaggedPointer(),
-                   IsolateData::root_slot_offset(index));
-#endif
   }
 
   V<Word32> IsDataRefMap(V<Map> map) {

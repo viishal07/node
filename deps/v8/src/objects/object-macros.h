@@ -26,18 +26,24 @@
 // alignment, since we have int32 fields), and to add warnings which ensure that
 // there is no unwanted within-object padding.
 #if V8_CC_GNU
-
 #define V8_OBJECT_PUSH                                                    \
   _Pragma("pack(push)") _Pragma("pack(4)") _Pragma("GCC diagnostic push") \
       _Pragma("GCC diagnostic error \"-Wpadded\"")
 #define V8_OBJECT_POP _Pragma("pack(pop)") _Pragma("GCC diagnostic pop")
+#elif V8_CC_MSVC
+#define V8_OBJECT_PUSH                                           \
+  __pragma(pack(push)) __pragma(pack(4)) __pragma(warning(push)) \
+      __pragma(warning(default : 4820))
+#define V8_OBJECT_POP __pragma(pack(pop)) __pragma(warning(pop))
+#else
+#error Unsupported compiler
+#endif
 
 #define V8_OBJECT V8_OBJECT_PUSH
-
-// GCC wants this pragma to be a new statement, but we prefer to have
+// Compilers wants the pragmas to be a new statement, but we prefer to have
 // V8_OBJECT_END look like part of the definition. Insert a semicolon before the
-// pragma to make gcc happy, and use static_assert(true) to swallow the next
-// semicolon.
+// pragma to make the compilers happy, and use static_assert(true) to swallow
+// the next semicolon.
 #define V8_OBJECT_END \
   ;                   \
   V8_OBJECT_POP static_assert(true)
@@ -46,21 +52,6 @@
 #define V8_OBJECT_INNER_CLASS_END \
   ;                               \
   V8_OBJECT_PUSH static_assert(true)
-
-#elif V8_CC_MSVC
-#define V8_OBJECT_PUSH                                           \
-  __pragma(pack(push)) __pragma(pack(4)) __pragma(warning(push)) \
-      __pragma(warning(default : 4820))
-#define V8_OBJECT_POP __pragma(pack(pop)) __pragma(warning(pop))
-
-#define V8_OBJECT V8_OBJECT_PUSH
-#define V8_OBJECT_END V8_OBJECT_POP
-
-#define V8_OBJECT_INNER_CLASS V8_OBJECT_POP
-#define V8_OBJECT_INNER_CLASS_END V8_OBJECT_PUSH
-#else
-#error Unsupported compiler
-#endif
 
 // Since this changes visibility, it should always be last in a class
 // definition.
@@ -545,7 +536,7 @@
   EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST(holder, name, type, offset, \
                                                   tag)
 
-#define DECL_TRUSTED_POINTER_ACCESSORS(name, type)                           \
+#define DECL_TRUSTED_POINTER_GETTERS(name, type)                             \
   /* Trusted pointers currently always have release-acquire semantics. */    \
   /* However, we still expose explicit release-acquire accessors so it */    \
   /* can be made clear when they are required. */                            \
@@ -553,12 +544,23 @@
   /* routines for relaxed- and release-acquire semantics in the future. */   \
   inline Tagged<type> name(IsolateForSandbox isolate) const;                 \
   inline Tagged<type> name(IsolateForSandbox isolate, AcquireLoadTag) const; \
-  inline void set_##name(Tagged<type> value,                                 \
-                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);      \
-  inline void set_##name(Tagged<type> value, ReleaseStoreTag,                \
-                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);      \
-  inline bool has_##name() const;                                            \
+  inline bool has_##name() const;
+
+#define DECL_TRUSTED_POINTER_SETTERS(name, type)                           \
+  /* Trusted pointers currently always have release-acquire semantics. */  \
+  /* However, we still expose explicit release-acquire accessors so it */  \
+  /* can be made clear when they are required. */                          \
+  /* If desired, we could create separate {Read|Write}TrustedPointer */    \
+  /* routines for relaxed- and release-acquire semantics in the future. */ \
+  inline void set_##name(Tagged<type> value,                               \
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);    \
+  inline void set_##name(Tagged<type> value, ReleaseStoreTag,              \
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);    \
   inline void clear_##name();
+
+#define DECL_TRUSTED_POINTER_ACCESSORS(name, type) \
+  DECL_TRUSTED_POINTER_GETTERS(name, type)         \
+  DECL_TRUSTED_POINTER_SETTERS(name, type)
 
 #define TRUSTED_POINTER_ACCESSORS(holder, name, type, offset, tag)             \
   Tagged<type> holder::name(IsolateForSandbox isolate) const {                 \
@@ -694,41 +696,25 @@
 
 #ifdef V8_DISABLE_WRITE_BARRIERS
 #define WRITE_BARRIER(object, offset, value)
-#define WRITE_BARRIER_CPP(object, offset, value)
 #else
-#define WRITE_BARRIER(object, offset, value)                              \
-  do {                                                                    \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                   \
-    static_assert(kTaggedCanConvertToRawObjects);                         \
-    CombinedWriteBarrier(object, Tagged(object)->RawField(offset), value, \
-                         UPDATE_WRITE_BARRIER);                           \
+#define WRITE_BARRIER(object, offset, value)                                \
+  do {                                                                      \
+    DCHECK(HeapLayout::IsOwnedByAnyHeap(object));                           \
+    static_assert(kTaggedCanConvertToRawObjects);                           \
+    WriteBarrier::ForValue(object, Tagged(object)->RawField(offset), value, \
+                           UPDATE_WRITE_BARRIER);                           \
   } while (false)
 #endif
 
 #ifdef V8_DISABLE_WRITE_BARRIERS
 #define WEAK_WRITE_BARRIER(object, offset, value)
 #else
-#define WEAK_WRITE_BARRIER(object, offset, value)                           \
-  do {                                                                      \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                     \
-    static_assert(kTaggedCanConvertToRawObjects);                           \
-    CombinedWriteBarrier(object, Tagged(object)->RawMaybeWeakField(offset), \
-                         value, UPDATE_WRITE_BARRIER);                      \
-  } while (false)
-#endif
-
-#ifdef V8_DISABLE_WRITE_BARRIERS
-#define EPHEMERON_KEY_WRITE_BARRIER(object, offset, value)
-#elif V8_ENABLE_UNCONDITIONAL_WRITE_BARRIERS
-#define EPHEMERON_KEY_WRITE_BARRIER(object, offset, value) \
-  WRITE_BARRIER(object, offset, value)
-#else
-#define EPHEMERON_KEY_WRITE_BARRIER(object, offset, value)           \
-  do {                                                               \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));              \
-    CombinedEphemeronWriteBarrier(Cast<EphemeronHashTable>(object),  \
-                                  (object)->RawField(offset), value, \
-                                  UPDATE_WRITE_BARRIER);             \
+#define WEAK_WRITE_BARRIER(object, offset, value)                             \
+  do {                                                                        \
+    DCHECK(HeapLayout::IsOwnedByAnyHeap(object));                             \
+    static_assert(kTaggedCanConvertToRawObjects);                             \
+    WriteBarrier::ForValue(object, Tagged(object)->RawMaybeWeakField(offset), \
+                           value, UPDATE_WRITE_BARRIER);                      \
   } while (false)
 #endif
 
@@ -737,8 +723,8 @@
 #else
 #define INDIRECT_POINTER_WRITE_BARRIER(object, offset, tag, value)           \
   do {                                                                       \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                      \
-    IndirectPointerWriteBarrier(                                             \
+    DCHECK(HeapLayout::IsOwnedByAnyHeap(object));                            \
+    WriteBarrier::ForIndirectPointer(                                        \
         object, Tagged(object)->RawIndirectPointerField(offset, tag), value, \
         UPDATE_WRITE_BARRIER);                                               \
   } while (false)
@@ -747,10 +733,10 @@
 #ifdef V8_DISABLE_WRITE_BARRIERS
 #define JS_DISPATCH_HANDLE_WRITE_BARRIER(object, handle)
 #else
-#define JS_DISPATCH_HANDLE_WRITE_BARRIER(object, handle)                \
-  do {                                                                  \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                 \
-    JSDispatchHandleWriteBarrier(object, handle, UPDATE_WRITE_BARRIER); \
+#define JS_DISPATCH_HANDLE_WRITE_BARRIER(object, handle)                     \
+  do {                                                                       \
+    DCHECK(HeapLayout::IsOwnedByAnyHeap(object));                            \
+    WriteBarrier::ForJSDispatchHandle(object, handle, UPDATE_WRITE_BARRIER); \
   } while (false)
 #endif
 
@@ -760,10 +746,10 @@
 #define CONDITIONAL_WRITE_BARRIER(object, offset, value, mode) \
   WRITE_BARRIER(object, offset, value)
 #else
-#define CONDITIONAL_WRITE_BARRIER(object, offset, value, mode)             \
-  do {                                                                     \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                    \
-    CombinedWriteBarrier(object, (object)->RawField(offset), value, mode); \
+#define CONDITIONAL_WRITE_BARRIER(object, offset, value, mode)               \
+  do {                                                                       \
+    DCHECK(HeapLayout::IsOwnedByAnyHeap(object));                            \
+    WriteBarrier::ForValue(object, (object)->RawField(offset), value, mode); \
   } while (false)
 #endif
 
@@ -773,22 +759,11 @@
 #define CONDITIONAL_WEAK_WRITE_BARRIER(object, offset, value, mode) \
   WRITE_BARRIER(object, offset, value)
 #else
-#define CONDITIONAL_WEAK_WRITE_BARRIER(object, offset, value, mode)          \
-  do {                                                                       \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                      \
-    CombinedWriteBarrier(object, (object)->RawMaybeWeakField(offset), value, \
-                         mode);                                              \
-  } while (false)
-#endif
-
-#ifdef V8_DISABLE_WRITE_BARRIERS
-#define CONDITIONAL_EPHEMERON_KEY_WRITE_BARRIER(object, offset, value, mode)
-#else
-#define CONDITIONAL_EPHEMERON_KEY_WRITE_BARRIER(object, offset, value, mode) \
-  do {                                                                       \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                      \
-    CombinedEphemeronWriteBarrier(Cast<EphemeronHashTable>(object),          \
-                                  (object)->RawField(offset), value, mode);  \
+#define CONDITIONAL_WEAK_WRITE_BARRIER(object, offset, value, mode)            \
+  do {                                                                         \
+    DCHECK(HeapLayout::IsOwnedByAnyHeap(object));                              \
+    WriteBarrier::ForValue(object, (object)->RawMaybeWeakField(offset), value, \
+                           mode);                                              \
   } while (false)
 #endif
 
@@ -799,8 +774,8 @@
 #define CONDITIONAL_INDIRECT_POINTER_WRITE_BARRIER(object, offset, tag, value, \
                                                    mode)                       \
   do {                                                                         \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                        \
-    IndirectPointerWriteBarrier(                                               \
+    DCHECK(HeapLayout::IsOwnedByAnyHeap(object));                              \
+    WriteBarrier::ForIndirectPointer(                                          \
         object, (object).RawIndirectPointerField(offset, tag), value, mode);   \
   } while (false)
 #endif
@@ -813,7 +788,7 @@
 #define CONDITIONAL_TRUSTED_POINTER_WRITE_BARRIER(object, offset, tag, value, \
                                                   mode)                       \
   CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);
-#endif
+#endif  // V8_ENABLE_SANDBOX
 #define CONDITIONAL_CODE_POINTER_WRITE_BARRIER(object, offset, value, mode) \
   CONDITIONAL_TRUSTED_POINTER_WRITE_BARRIER(                                \
       object, offset, kCodeIndirectPointerTag, value, mode)
@@ -821,10 +796,20 @@
 #define CONDITIONAL_PROTECTED_POINTER_WRITE_BARRIER(object, offset, value, \
                                                     mode)                  \
   do {                                                                     \
-    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                    \
-    ProtectedPointerWriteBarrier(                                          \
+    DCHECK(HeapLayout::IsOwnedByAnyHeap(object));                          \
+    WriteBarrier::ForProtectedPointer(                                     \
         object, (object).RawProtectedPointerField(offset), value, mode);   \
   } while (false)
+
+#ifdef V8_DISABLE_WRITE_BARRIERS
+#define CONDITIONAL_JS_DISPATCH_HANDLE_WRITE_BARRIER(object, handle, mode)
+#else
+#define CONDITIONAL_JS_DISPATCH_HANDLE_WRITE_BARRIER(object, handle, mode) \
+  do {                                                                     \
+    DCHECK(HeapLayout::IsOwnedByAnyHeap(object));                          \
+    WriteBarrier::ForJSDispatchHandle(object, handle, mode);               \
+  } while (false)
+#endif
 
 #define ACQUIRE_READ_INT8_FIELD(p, offset) \
   static_cast<int8_t>(base::Acquire_Load(  \

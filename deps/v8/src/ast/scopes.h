@@ -573,6 +573,7 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
   // Find the innermost outer scope that needs a context.
   Scope* GetOuterScopeWithContext();
 
+  bool HasReceiverToDeserialize() const;
   bool HasThisReference() const;
   // Analyze() must have been called once to create the ScopeInfo.
   Handle<ScopeInfo> scope_info() const {
@@ -605,12 +606,6 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
   bool is_debug_evaluate_scope() const { return is_debug_evaluate_scope_; }
   bool IsSkippableFunctionScope();
   bool is_repl_mode_scope() const { return scope_type_ == REPL_MODE_SCOPE; }
-  void set_deserialized_scope_uses_external_cache() {
-    deserialized_scope_uses_external_cache_ = true;
-  }
-  bool deserialized_scope_uses_external_cache() const {
-    return deserialized_scope_uses_external_cache_;
-  }
 
   bool needs_home_object() const {
     DCHECK(is_home_object_scope());
@@ -840,25 +835,6 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
 
   bool must_use_preparsed_scope_data_ : 1;
 
-  // True if this is a deserialized scope which caches its lookups on another
-  // Scope's variable map. This will be true for every scope above the first
-  // non-eval declaration scope above the compilation entry point, e.g. for
-  //
-  //     function f() {
-  //       let g; // prevent sloppy block function hoisting.
-  //       with({}) {
-  //         function g() {
-  //           try { throw 0; }
-  //           catch { eval("f"); }
-  //         }
-  //         g();
-  //       }
-  //     }
-  //
-  // the compilation of the eval will have the "with" scope as the first scope
-  // with this flag enabled.
-  bool deserialized_scope_uses_external_cache_ : 1;
-
   bool needs_home_object_ : 1;
   bool is_block_scope_for_object_literal_ : 1;
 
@@ -915,7 +891,7 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
     // so we don't care that it calls sloppy eval.
     if (is_script_scope()) return;
 
-    // Sloppy eval in a eval scope can only introduce variables into the outer
+    // Sloppy eval in an eval scope can only introduce variables into the outer
     // (non-eval) declaration scope, not into this eval scope.
     if (is_eval_scope()) {
 #ifdef DEBUG

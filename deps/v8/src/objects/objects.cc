@@ -142,8 +142,10 @@ ShouldThrow GetShouldThrow(Isolate* isolate, Maybe<ShouldThrow> should_throw) {
   LanguageMode mode = isolate->context()->scope_info()->language_mode();
   if (mode == LanguageMode::kStrict) return kThrowOnError;
 
-  for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
-    if (!it.frame()->is_java_script()) continue;
+  for (StackFrameIterator it(isolate, isolate->thread_local_top(),
+                             StackFrameIterator::NoHandles{});
+       !it.done(); it.Advance()) {
+    if (!it.frame()->is_javascript()) continue;
 
     // Get the language mode from closure.
     JavaScriptFrame* js_frame = static_cast<JavaScriptFrame*>(it.frame());
@@ -477,8 +479,8 @@ DirectHandle<String> NoSideEffectsErrorToString(Isolate* isolate,
   if (msg_str->length() == 0) return name_str;
 
   constexpr const char error_suffix[] = "<a very large string>";
-  constexpr int error_suffix_size = sizeof(error_suffix);
-  int suffix_size = std::min(error_suffix_size, msg_str->length());
+  constexpr uint32_t error_suffix_size = sizeof(error_suffix);
+  uint32_t suffix_size = std::min(error_suffix_size, msg_str->length());
 
   IncrementalStringBuilder builder(isolate);
   if (name_str->length() + suffix_size + 2 /* ": " */ > String::kMaxLength) {
@@ -1895,10 +1897,6 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
     return BytecodeArray::SizeFor(
         UncheckedCast<BytecodeArray>(*this)->length(kAcquireLoad));
   }
-  if (instance_type == EXTERNAL_POINTER_ARRAY_TYPE) {
-    return ExternalPointerArray::SizeFor(
-        UncheckedCast<ExternalPointerArray>(*this)->length(kAcquireLoad));
-  }
   if (instance_type == FREE_SPACE_TYPE) {
     return UncheckedCast<FreeSpace>(*this)->size(kRelaxedLoad);
   }
@@ -2016,7 +2014,7 @@ bool HeapObject::NeedsRehashing(PtrComprCageBase cage_base) const {
 
 bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
   if (V8_EXTERNAL_CODE_SPACE_BOOL) {
-    // Use map() only when it's guaranteed that it's not a InstructionStream
+    // Use map() only when it's guaranteed that it's not an InstructionStream
     // object.
     DCHECK_IMPLIES(instance_type != INSTRUCTION_STREAM_TYPE,
                    instance_type == map()->instance_type());
@@ -2028,7 +2026,7 @@ bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
     case STRONG_DESCRIPTOR_ARRAY_TYPE:
       return Cast<DescriptorArray>(*this)->number_of_descriptors() > 1;
     case TRANSITION_ARRAY_TYPE:
-      return Cast<TransitionArray>(*this)->number_of_entries() > 1;
+      return Cast<TransitionArray>(*this)->number_of_transitions() > 1;
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
       return false;  // We'll rehash from the JSMap or JSSet referencing them.
@@ -2287,26 +2285,38 @@ Maybe<bool> Object::SetPropertyInternal(LookupIterator* it,
         // perform the possibly effectful ToNumber (or ToBigInt) operation
         // anyways.
         DirectHandle<JSTypedArray> holder = it->GetHolder<JSTypedArray>();
-        Handle<Object> throwaway_value;
+        Handle<Object> converted_value;
         if (holder->type() == kExternalBigInt64Array ||
             holder->type() == kExternalBigUint64Array) {
           ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-              it->isolate(), throwaway_value,
+              it->isolate(), converted_value,
               BigInt::FromObject(it->isolate(), value), Nothing<bool>());
         } else {
           ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-              it->isolate(), throwaway_value,
+              it->isolate(), converted_value,
               Object::ToNumber(it->isolate(), value), Nothing<bool>());
         }
 
-        // FIXME: Throw a TypeError if the holder is detached here
-        // (IntegerIndexedElementSpec step 5).
+        // For RAB/GSABs, the above conversion might grow the buffer so that the
+        // index is no longer out of bounds. Redo the bounds check and try
+        // again.
+        it->RecheckTypedArrayBounds();
+        if (it->state() != LookupIterator::DATA) {
+          // Still out of bounds.
+          DCHECK_EQ(it->state(), LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND);
 
-        // TODO(verwaest): Per spec, we should return false here (steps 6-9
-        // in IntegerIndexedElementSpec), resulting in an exception being thrown
-        // on OOB accesses in strict code. Historically, v8 has not done made
-        // this change due to uncertainty about web compat. (v8:4901)
-        return Just(true);
+          // FIXME: Throw a TypeError if the holder is detached here
+          // (IntegerIndexedElementSet step 5).
+
+          // TODO(verwaest): Per spec, we should return false here (steps 6-9
+          // in IntegerIndexedElementSet), resulting in an exception being
+          // thrown on OOB accesses in strict code. Historically, v8 has not
+          // done made this change due to uncertainty about web compat.
+          // (v8:4901)
+          return Just(true);
+        }
+        value = converted_value;
+        [[fallthrough]];
       }
 
       case LookupIterator::DATA:
@@ -2925,7 +2935,8 @@ Maybe<bool> JSProxy::DeletePropertyOrElement(DirectHandle<JSProxy> proxy,
       isolate, trap, Object::GetMethod(isolate, handler, trap_name),
       Nothing<bool>());
   if (IsUndefined(*trap, isolate)) {
-    return JSReceiver::DeletePropertyOrElement(target, name, language_mode);
+    return JSReceiver::DeletePropertyOrElement(isolate, target, name,
+                                               language_mode);
   }
 
   Handle<Object> trap_result;
@@ -4158,10 +4169,9 @@ Address JSArray::ArrayJoinConcatToSequentialString(Isolate* isolate,
   return dest.ptr();
 }
 
-uint32_t StringHasher::MakeArrayIndexHash(uint32_t value, int length) {
+uint32_t StringHasher::MakeArrayIndexHash(uint32_t value, uint32_t length) {
   // For array indexes mix the length into the hash as an array index could
   // be zero.
-  DCHECK_GT(length, 0);
   DCHECK_LE(length, String::kMaxArrayIndexSize);
   DCHECK(TenToThe(String::kMaxCachedArrayIndexLength) <
          (1 << String::kArrayIndexValueBits));
@@ -4437,7 +4447,7 @@ bool Script::GetPositionInfoInternal(
   if (info->line_end > 0) {
     DCHECK(IsString(source()));
     Tagged<String> src = Cast<String>(source());
-    if (src->length() >= info->line_end &&
+    if (src->length() >= static_cast<uint32_t>(info->line_end) &&
         src->Get(info->line_end - 1) == '\r') {
       info->line_end--;
     }
@@ -4843,14 +4853,6 @@ const char* JSPromise::Status(v8::Promise::PromiseState status) {
   UNREACHABLE();
 }
 
-int JSPromise::async_task_id() const {
-  return AsyncTaskIdBits::decode(flags());
-}
-
-void JSPromise::set_async_task_id(int id) {
-  set_flags(AsyncTaskIdBits::update(flags(), id));
-}
-
 // static
 Handle<Object> JSPromise::Fulfill(DirectHandle<JSPromise> promise,
                                   DirectHandle<Object> value) {
@@ -4974,8 +4976,8 @@ MaybeHandle<Object> JSPromise::Resolve(Handle<JSPromise> promise,
   // %ObjectPrototype%, meaning that such lookups are guaranteed to yield
   // undefined without triggering any side-effects.
   if (IsJSPromise(*receiver) &&
-      isolate->IsInAnyContext(receiver->map()->prototype(),
-                              Context::PROMISE_PROTOTYPE_INDEX) &&
+      receiver->map()->prototype()->map()->instance_type() ==
+          JS_PROMISE_PROTOTYPE_TYPE &&
       Protectors::IsPromiseThenLookupChainIntact(isolate)) {
     // We can skip the "then" lookup on {resolution} if its [[Prototype]]
     // is the (initial) Promise.prototype and the Promise#then protector
@@ -5098,6 +5100,7 @@ Handle<Object> JSPromise::TriggerPromiseReactions(
             PromiseReactionJobTask::kSizeOfAllPromiseReactionJobTasks));
     if (type == PromiseReaction::kFulfill) {
       task->set_map(
+          isolate,
           ReadOnlyRoots(isolate).promise_fulfill_reaction_job_task_map(),
           kReleaseStore);
       Cast<PromiseFulfillReactionJobTask>(task)->set_argument(*argument);
@@ -5119,6 +5122,7 @@ Handle<Object> JSPromise::TriggerPromiseReactions(
     } else {
       DisallowGarbageCollection no_gc;
       task->set_map(
+          isolate,
           ReadOnlyRoots(isolate).promise_reject_reaction_job_task_map(),
           kReleaseStore);
       Cast<PromiseRejectReactionJobTask>(task)->set_argument(*argument);
@@ -5148,12 +5152,12 @@ Handle<Object> JSPromise::TriggerPromiseReactions(
 
 template <typename Derived, typename Shape>
 void HashTable<Derived, Shape>::IteratePrefix(ObjectVisitor* v) {
-  BodyDescriptorBase::IteratePointers(*this, 0, kElementsStartOffset, v);
+  BodyDescriptorBase::IteratePointers(this, 0, kElementsStartOffset, v);
 }
 
 template <typename Derived, typename Shape>
 void HashTable<Derived, Shape>::IterateElements(ObjectVisitor* v) {
-  BodyDescriptorBase::IteratePointers(*this, kElementsStartOffset,
+  BodyDescriptorBase::IteratePointers(this, kElementsStartOffset,
                                       SizeFor(length()), v);
 }
 
@@ -5206,7 +5210,7 @@ void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base,
   }
 
   // Rehash the elements.
-  ReadOnlyRoots roots = GetReadOnlyRoots(cage_base);
+  ReadOnlyRoots roots = GetReadOnlyRoots();
   for (InternalIndex i : this->IterateEntries()) {
     uint32_t from_index = EntryToIndex(i);
     Tagged<Object> k = this->get(from_index);
@@ -5321,7 +5325,7 @@ Handle<Derived> HashTable<Derived, Shape>::EnsureCapacity(
 
   bool should_pretenure = allocation == AllocationType::kOld ||
                           ((capacity > kMinCapacityForPretenure) &&
-                           !Heap::InYoungGeneration(*table));
+                           !HeapLayout::InYoungGeneration(*table));
   Handle<Derived> new_table = HashTable::New(
       isolate, new_nof,
       should_pretenure ? AllocationType::kOld : AllocationType::kYoung);
@@ -5381,7 +5385,7 @@ Handle<Derived> HashTable<Derived, Shape>::Shrink(Isolate* isolate,
   DCHECK_GE(new_capacity, Derived::kMinShrinkCapacity);
 
   bool pretenure = (new_capacity > kMinCapacityForPretenure) &&
-                   !Heap::InYoungGeneration(*table);
+                   !HeapLayout::InYoungGeneration(*table);
   Handle<Derived> new_table =
       HashTable::New(isolate, new_capacity,
                      pretenure ? AllocationType::kOld : AllocationType::kYoung,
@@ -5676,7 +5680,7 @@ void NumberDictionary::UpdateMaxNumberKey(uint32_t key,
   // elements.
   if (key > kRequiresSlowElementsLimit) {
     if (!dictionary_holder.is_null()) {
-      dictionary_holder->RequireSlowElements(*this);
+      dictionary_holder->RequireSlowElements(this);
     }
     set_requires_slow_elements();
     return;
@@ -5775,7 +5779,7 @@ Handle<FixedArray> BaseNameDictionary<Derived, Shape>::IterationIndices(
 template <typename Derived, typename Shape>
 Tagged<Object> Dictionary<Derived, Shape>::SlowReverseLookup(
     Tagged<Object> value) {
-  Tagged<Derived> dictionary = Cast<Derived>(*this);
+  Tagged<Derived> dictionary = Cast<Derived>(this);
   ReadOnlyRoots roots = dictionary->GetReadOnlyRoots();
   for (InternalIndex i : dictionary->IterateEntries()) {
     Tagged<Object> k;
@@ -5800,7 +5804,7 @@ template <typename Derived, typename Shape>
 Tagged<Object> ObjectHashTableBase<Derived, Shape>::Lookup(
     PtrComprCageBase cage_base, Handle<Object> key, int32_t hash) {
   DisallowGarbageCollection no_gc;
-  ReadOnlyRoots roots = this->GetReadOnlyRoots(cage_base);
+  ReadOnlyRoots roots = this->GetReadOnlyRoots();
   DCHECK(this->IsKey(roots, *key));
 
   InternalIndex entry = this->FindEntry(cage_base, roots, key, hash);
@@ -5812,8 +5816,8 @@ Tagged<Object> ObjectHashTableBase<Derived, Shape>::Lookup(
 // CodeStubAssembler::NameToIndexHashTableLookup.
 int NameToIndexHashTable::Lookup(Handle<Name> key) {
   DisallowGarbageCollection no_gc;
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  ReadOnlyRoots roots = this->GetReadOnlyRoots(cage_base);
+  PtrComprCageBase cage_base = GetPtrComprCageBase(this);
+  ReadOnlyRoots roots = this->GetReadOnlyRoots();
 
   InternalIndex entry = this->FindEntry(cage_base, roots, key, key->hash());
   if (entry.is_not_found()) return -1;
@@ -5824,8 +5828,8 @@ template <typename Derived, typename Shape>
 Tagged<Object> ObjectHashTableBase<Derived, Shape>::Lookup(Handle<Object> key) {
   DisallowGarbageCollection no_gc;
 
-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  ReadOnlyRoots roots = this->GetReadOnlyRoots(cage_base);
+  PtrComprCageBase cage_base = GetPtrComprCageBase(this);
+  ReadOnlyRoots roots = this->GetReadOnlyRoots();
   DCHECK(this->IsKey(roots, *key));
 
   // If the object does not have an identity hash, it was never used as a key.
@@ -5839,7 +5843,7 @@ Tagged<Object> ObjectHashTableBase<Derived, Shape>::Lookup(Handle<Object> key) {
 template <typename Derived, typename Shape>
 Tagged<Object> ObjectHashTableBase<Derived, Shape>::Lookup(Handle<Object> key,
                                                            int32_t hash) {
-  return Lookup(GetPtrComprCageBase(*this), key, hash);
+  return Lookup(GetPtrComprCageBase(this), key, hash);
 }
 
 template <typename Derived, typename Shape>
@@ -5985,7 +5989,7 @@ void ObjectHashTableBase<Derived, Shape>::RemoveEntry(InternalIndex entry) {
 template <typename Derived, int N>
 std::array<Tagged<Object>, N> ObjectMultiHashTableBase<Derived, N>::Lookup(
     Handle<Object> key) {
-  return Lookup(GetPtrComprCageBase(*this), key);
+  return Lookup(GetPtrComprCageBase(this), key);
 }
 
 template <typename Derived, int N>
@@ -5993,7 +5997,7 @@ std::array<Tagged<Object>, N> ObjectMultiHashTableBase<Derived, N>::Lookup(
     PtrComprCageBase cage_base, Handle<Object> key) {
   DisallowGarbageCollection no_gc;
 
-  ReadOnlyRoots roots = this->GetReadOnlyRoots(cage_base);
+  ReadOnlyRoots roots = this->GetReadOnlyRoots();
   DCHECK(this->IsKey(roots, *key));
 
   Tagged<Object> hash_obj = Object::GetHash(*key);
@@ -6183,8 +6187,11 @@ void JSDisposableStackBase::InitializeJSDisposableStackBase(
     Isolate* isolate, DirectHandle<JSDisposableStackBase> disposable_stack) {
   DirectHandle<FixedArray> array = isolate->factory()->NewFixedArray(0);
   disposable_stack->set_stack(*array);
+  disposable_stack->set_needsAwait(false);
+  disposable_stack->set_hasAwaited(false);
   disposable_stack->set_length(0);
   disposable_stack->set_state(DisposableStackState::kPending);
+  disposable_stack->set_error(*(isolate->factory()->uninitialized_value()));
 }
 
 void PropertyCell::ClearAndInvalidate(ReadOnlyRoots roots) {

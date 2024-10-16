@@ -12,6 +12,7 @@
 #include "src/execution/isolate.h"
 #include "src/handles/handles-inl.h"
 #include "src/handles/maybe-handles.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/log.h"
@@ -99,9 +100,6 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
   }
 
   switch (instance_type) {
-    case EXTERNAL_POINTER_ARRAY_TYPE:
-      return kVisitExternalPointerArray;
-
     case FILLER_TYPE:
       return kVisitFiller;
     case FREE_SPACE_TYPE:
@@ -318,7 +316,6 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
 #endif  // V8_INTL_SUPPORT
 #if V8_ENABLE_WEBASSEMBLY
     case WASM_EXCEPTION_PACKAGE_TYPE:
-    case WASM_MEMORY_OBJECT_TYPE:
     case WASM_MODULE_OBJECT_TYPE:
     case WASM_VALUE_OBJECT_TYPE:
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -406,32 +403,34 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
       return kVisitSyntheticModule;
 
 #if V8_ENABLE_WEBASSEMBLY
-    case WASM_INSTANCE_OBJECT_TYPE:
-      return kVisitWasmInstanceObject;
     case WASM_ARRAY_TYPE:
       return kVisitWasmArray;
-    case WASM_STRUCT_TYPE:
-      return kVisitWasmStruct;
     case WASM_CONTINUATION_OBJECT_TYPE:
       return kVisitWasmContinuationObject;
-    case WASM_TYPE_INFO_TYPE:
-      return kVisitWasmTypeInfo;
-    case WASM_RESUME_DATA_TYPE:
-      return kVisitWasmResumeData;
     case WASM_FUNC_REF_TYPE:
       return kVisitWasmFuncRef;
-    case WASM_TAG_OBJECT_TYPE:
-      return kVisitWasmTagObject;
-    case WASM_TABLE_OBJECT_TYPE:
-      return kVisitWasmTableObject;
     case WASM_GLOBAL_OBJECT_TYPE:
       return kVisitWasmGlobalObject;
+    case WASM_INSTANCE_OBJECT_TYPE:
+      return kVisitWasmInstanceObject;
+    case WASM_MEMORY_OBJECT_TYPE:
+      return kVisitWasmMemoryObject;
+    case WASM_NULL_TYPE:
+      return kVisitWasmNull;
+    case WASM_RESUME_DATA_TYPE:
+      return kVisitWasmResumeData;
+    case WASM_STRUCT_TYPE:
+      return kVisitWasmStruct;
     case WASM_SUSPENDER_OBJECT_TYPE:
       return kVisitWasmSuspenderObject;
     case WASM_SUSPENDING_OBJECT_TYPE:
       return kVisitWasmSuspendingObject;
-    case WASM_NULL_TYPE:
-      return kVisitWasmNull;
+    case WASM_TABLE_OBJECT_TYPE:
+      return kVisitWasmTableObject;
+    case WASM_TAG_OBJECT_TYPE:
+      return kVisitWasmTagObject;
+    case WASM_TYPE_INFO_TYPE:
+      return kVisitWasmTypeInfo;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 #define MAKE_TQ_CASE(TYPE, Name) \
@@ -646,7 +645,8 @@ void Map::ReplaceDescriptors(Isolate* isolate,
   // all its elements.
   Tagged<Map> current = *this;
 #ifndef V8_DISABLE_WRITE_BARRIERS
-  WriteBarrier::Marking(to_replace, to_replace->number_of_descriptors());
+  WriteBarrier::ForDescriptorArray(to_replace,
+                                   to_replace->number_of_descriptors());
 #endif
   while (current->instance_descriptors(cage_base) == to_replace) {
     Tagged<Map> next;
@@ -844,7 +844,8 @@ void Map::EnsureDescriptorSlack(Isolate* isolate, DirectHandle<Map> map,
   // descriptors will not be trimmed in the mark-compactor, we need to mark
   // all its elements.
 #ifndef V8_DISABLE_WRITE_BARRIERS
-  WriteBarrier::Marking(*descriptors, descriptors->number_of_descriptors());
+  WriteBarrier::ForDescriptorArray(*descriptors,
+                                   descriptors->number_of_descriptors());
 #endif
 
   // Update the descriptors from {map} (inclusive) until the initial map
@@ -1267,7 +1268,7 @@ Handle<Map> Map::Normalize(Isolate* isolate, Handle<Map> fast_map,
 
   Handle<Map> new_map;
   if (use_cache && cache
-                       ->Get(fast_map, new_elements_kind,
+                       ->Get(isolate, fast_map, new_elements_kind,
                              new_prototype.is_null() ? fast_map->prototype()
                                                      : *new_prototype,
                              mode)
@@ -1329,7 +1330,7 @@ Handle<Map> Map::Normalize(Isolate* isolate, Handle<Map> fast_map,
       DCHECK(new_map->is_dictionary_map() && !new_map->is_deprecated());
     }
     if (use_cache) {
-      cache->Set(fast_map, new_map);
+      cache->Set(isolate, fast_map, new_map);
     }
     if (v8_flags.log_maps) {
       LOG(isolate, MapEvent("Normalize", fast_map, new_map, reason));
@@ -2204,9 +2205,7 @@ Handle<Map> Map::CopyReplaceDescriptor(
                                 "CopyReplaceDescriptor", simple_flag);
 }
 
-int Map::Hash() { return Hash(prototype()); }
-
-int Map::Hash(Tagged<HeapObject> prototype) {
+int Map::Hash(Isolate* isolate, Tagged<HeapObject> prototype) {
   // For performance reasons we only hash the 2 most variable fields of a map:
   // prototype and bit_field2.
 
@@ -2216,7 +2215,6 @@ int Map::Hash(Tagged<HeapObject> prototype) {
     prototype_hash = 1;
   } else {
     Tagged<JSReceiver> receiver = Cast<JSReceiver>(prototype);
-    Isolate* isolate = GetIsolateFromWritableObject(receiver);
     prototype_hash = receiver->GetOrCreateIdentityHash(isolate).value();
   }
 
@@ -2322,11 +2320,14 @@ int Map::ComputeMinObjectSlack(Isolate* isolate) {
 
 void Map::SetInstanceDescriptors(Isolate* isolate,
                                  Tagged<DescriptorArray> descriptors,
-                                 int number_of_own_descriptors) {
-  set_instance_descriptors(descriptors, kReleaseStore);
+                                 int number_of_own_descriptors,
+                                 WriteBarrierMode barrier_mode) {
+  DCHECK_IMPLIES(barrier_mode == WriteBarrierMode::SKIP_WRITE_BARRIER,
+                 HeapLayout::InReadOnlySpace(descriptors));
+  set_instance_descriptors(descriptors, kReleaseStore, barrier_mode);
   SetNumberOfOwnDescriptors(number_of_own_descriptors);
 #ifndef V8_DISABLE_WRITE_BARRIERS
-  WriteBarrier::Marking(descriptors, number_of_own_descriptors);
+  WriteBarrier::ForDescriptorArray(descriptors, number_of_own_descriptors);
 #endif
 }
 
@@ -2430,7 +2431,8 @@ void Map::SetPrototype(Isolate* isolate, DirectHandle<Map> map,
     JSObject::OptimizeAsPrototype(prototype_jsobj, enable_prototype_setup_mode);
   } else {
     DCHECK(IsNull(*prototype, isolate) || IsJSProxy(*prototype) ||
-           IsWasmObject(*prototype) || InWritableSharedSpace(*prototype));
+           IsWasmObject(*prototype) ||
+           HeapLayout::InWritableSharedSpace(*prototype));
   }
 
   WriteBarrierMode wb_mode =
@@ -2485,13 +2487,14 @@ Handle<NormalizedMapCache> NormalizedMapCache::New(Isolate* isolate) {
   return Cast<NormalizedMapCache>(array);
 }
 
-MaybeHandle<Map> NormalizedMapCache::Get(DirectHandle<Map> fast_map,
+MaybeHandle<Map> NormalizedMapCache::Get(Isolate* isolate,
+                                         DirectHandle<Map> fast_map,
                                          ElementsKind elements_kind,
                                          Tagged<HeapObject> prototype,
                                          PropertyNormalizationMode mode) {
   DisallowGarbageCollection no_gc;
   Tagged<MaybeObject> value =
-      WeakFixedArray::get(GetIndex(*fast_map, *prototype));
+      WeakFixedArray::get(GetIndex(isolate, *fast_map, *prototype));
   Tagged<HeapObject> heap_object;
   if (!value.GetHeapObjectIfWeak(&heap_object)) {
     return MaybeHandle<Map>();
@@ -2503,14 +2506,14 @@ MaybeHandle<Map> NormalizedMapCache::Get(DirectHandle<Map> fast_map,
                                                     prototype, mode)) {
     return MaybeHandle<Map>();
   }
-  return handle(normalized_map, GetIsolate());
+  return handle(normalized_map, isolate);
 }
 
-void NormalizedMapCache::Set(DirectHandle<Map> fast_map,
+void NormalizedMapCache::Set(Isolate* isolate, DirectHandle<Map> fast_map,
                              DirectHandle<Map> normalized_map) {
   DisallowGarbageCollection no_gc;
   DCHECK(normalized_map->is_dictionary_map());
-  WeakFixedArray::set(GetIndex(*fast_map, normalized_map->prototype()),
+  WeakFixedArray::set(GetIndex(isolate, *fast_map, normalized_map->prototype()),
                       MakeWeak(*normalized_map));
 }
 

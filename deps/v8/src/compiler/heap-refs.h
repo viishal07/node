@@ -231,8 +231,6 @@ struct ref_traits<PropertyArray> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<ByteArray> : public ref_traits<HeapObject> {};
 template <>
-struct ref_traits<ExternalPointerArray> : public ref_traits<HeapObject> {};
-template <>
 struct ref_traits<TrustedFixedArray> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<ClosureFeedbackCellArray> : public ref_traits<HeapObject> {};
@@ -1085,26 +1083,27 @@ class ScopeInfoRef : public HeapObjectRef {
   ScopeInfoRef OuterScopeInfo(JSHeapBroker* broker) const;
 };
 
-#define BROKER_SFI_FIELDS(V)                                    \
-  V(int, internal_formal_parameter_count_with_receiver)         \
-  V(int, internal_formal_parameter_count_without_receiver)      \
-  V(bool, IsDontAdaptArguments)                                 \
-  V(bool, has_simple_parameters)                                \
-  V(bool, has_duplicate_parameters)                             \
-  V(int, function_map_index)                                    \
-  V(FunctionKind, kind)                                         \
-  V(LanguageMode, language_mode)                                \
-  V(bool, native)                                               \
-  V(bool, HasBuiltinId)                                         \
-  V(bool, construct_as_builtin)                                 \
-  V(bool, HasBytecodeArray)                                     \
-  V(int, StartPosition)                                         \
-  V(bool, is_compiled)                                          \
-  V(bool, IsUserJavaScript)                                     \
-  V(bool, requires_instance_members_initializer)                \
-  IF_WASM(V, const wasm::WasmModule*, wasm_module)              \
-  IF_WASM(V, const wasm::FunctionSig*, wasm_function_signature) \
-  IF_WASM(V, int, wasm_function_index)
+#define BROKER_SFI_FIELDS(V)                                     \
+  V(int, internal_formal_parameter_count_with_receiver)          \
+  V(int, internal_formal_parameter_count_without_receiver)       \
+  V(bool, IsDontAdaptArguments)                                  \
+  V(bool, has_simple_parameters)                                 \
+  V(bool, has_duplicate_parameters)                              \
+  V(int, function_map_index)                                     \
+  V(FunctionKind, kind)                                          \
+  V(LanguageMode, language_mode)                                 \
+  V(bool, native)                                                \
+  V(bool, HasBuiltinId)                                          \
+  V(bool, construct_as_builtin)                                  \
+  V(bool, HasBytecodeArray)                                      \
+  V(int, StartPosition)                                          \
+  V(bool, is_compiled)                                           \
+  V(bool, IsUserJavaScript)                                      \
+  V(bool, requires_instance_members_initializer)                 \
+  IF_WASM(V, const wasm::WasmModule*, wasm_module)               \
+  IF_WASM(V, const wasm::CanonicalSig*, wasm_function_signature) \
+  IF_WASM(V, int, wasm_function_index)                           \
+  IF_WASM(V, bool, is_promising_wasm_export)
 
 class V8_EXPORT_PRIVATE SharedFunctionInfoRef : public HeapObjectRef {
  public:
@@ -1146,9 +1145,9 @@ class StringRef : public NameRef {
   // When concurrently accessing non-read-only non-supported strings, we return
   // std::nullopt for these methods.
   std::optional<Handle<String>> ObjectIfContentAccessible(JSHeapBroker* broker);
-  int length() const;
+  uint32_t length() const;
   std::optional<uint16_t> GetFirstChar(JSHeapBroker* broker) const;
-  std::optional<uint16_t> GetChar(JSHeapBroker* broker, int index) const;
+  std::optional<uint16_t> GetChar(JSHeapBroker* broker, uint32_t index) const;
   std::optional<double> ToNumber(JSHeapBroker* broker);
   std::optional<double> ToInt(JSHeapBroker* broker, int radix);
 

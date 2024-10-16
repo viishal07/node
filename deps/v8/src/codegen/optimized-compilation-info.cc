@@ -63,7 +63,8 @@ OptimizedCompilationInfo::OptimizedCompilationInfo(
       optimization_id_(kNoOptimizationId),
       debug_name_(debug_name) {
   DCHECK_IMPLIES(builtin_ != Builtin::kNoBuiltinId,
-                 code_kind_ == CodeKind::BUILTIN);
+                 (code_kind_ == CodeKind::BUILTIN ||
+                  code_kind_ == CodeKind::BYTECODE_HANDLER));
   SetTracingFlags(
       PassesFilter(debug_name, base::CStrVector(v8_flags.trace_turbo_filter)));
   ConfigureFlags();
@@ -73,8 +74,12 @@ OptimizedCompilationInfo::OptimizedCompilationInfo(
 void OptimizedCompilationInfo::ConfigureFlags() {
   if (v8_flags.turbo_inline_js_wasm_calls) set_inline_js_wasm_calls();
 
+  if (v8_flags.cet_compatible) {
+    set_shadow_stack_compliant_lazy_deopt();
+  }
+
   switch (code_kind_) {
-    case CodeKind::TURBOFAN:
+    case CodeKind::TURBOFAN_JS:
       set_called_with_code_start_register();
       set_switch_jump_table();
       if (v8_flags.analyze_environment_liveness) {
